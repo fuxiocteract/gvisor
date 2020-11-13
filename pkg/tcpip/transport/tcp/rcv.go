@@ -119,12 +119,30 @@ func (r *receiver) getSendParams() (rcvNxt seqnum.Value, rcvWnd seqnum.Size) {
 		// If the new window moves the right edge, then update rcvAcc.
 		r.rcvAcc = r.rcvNxt.Add(seqnum.Size(newWnd))
 	} else {
-		if newWnd == 0 {
-			// newWnd is zero but we can't advertise a zero as it would cause window
-			// to shrink so just increment a metric to record this event.
-			r.ep.stats.ReceiveErrors.WantZeroRcvWindow.Increment()
+		// If we do not have room to enqueue any new segment, we would have to
+		// shrink the previously advertised window. This can happen in cases
+		// where the peer is sending data size that is always < the segment
+		// overhead and the application is too slow or not reading the data and
+		// hence not freeing up used memory from the receive buffer.
+		// Example: With segment sizes of 512 bytes, on each receive and
+		// segment overhead being 552bytes (at the time of writing the comment):
+		// newWnd starts of reducing by ((512+552) >> rcvAdvWndScale(1))) 532,
+		// while curWnd reduces by 512. So, when newWnd becomes zero, curWnd is
+		// still far from zero (19436). This causes us to drop any segments that
+		// come by after newWnd is zero to be tail-dropped.
+		// We do not run into this problem for segments that are much larger
+		// than the segment overhead, which improves the balancing that we try
+		// to do between payload memory and overhead memory.
+		// For example: 1024bytes payloads have a smoother transition to zero
+		// window state.
+		if r.ep.receiveMemUsed() <= r.ep.receiveBufferSize() {
+			if newWnd == 0 {
+				// newWnd is zero but we can't advertise a zero as it would cause window
+				// to shrink so just increment a metric to record this event.
+				r.ep.stats.ReceiveErrors.WantZeroRcvWindow.Increment()
+			}
+			newWnd = curWnd
 		}
-		newWnd = curWnd
 	}
 	// Stash away the non-scaled receive window as we use it for measuring
 	// receiver's estimated RTT.
