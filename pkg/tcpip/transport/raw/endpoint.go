@@ -65,7 +65,6 @@ type endpoint struct {
 	stack       *stack.Stack `state:"manual"`
 	waiterQueue *waiter.Queue
 	associated  bool
-	hdrIncluded bool
 
 	// The following fields are used to manage the receive queue and are
 	// protected by rcvMu.
@@ -116,9 +115,9 @@ func newEndpoint(s *stack.Stack, netProto tcpip.NetworkProtocolNumber, transProt
 		rcvBufSizeMax: 32 * 1024,
 		sndBufSizeMax: 32 * 1024,
 		associated:    associated,
-		hdrIncluded:   !associated,
 	}
 	e.ops.InitHandler(e)
+	e.ops.SetHeaderIncluded(!associated)
 
 	// Override with stack defaults.
 	var ss stack.SendBufferSizeOption
@@ -269,7 +268,7 @@ func (e *endpoint) write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, <-c
 
 	// If this is an unassociated socket and callee provided a nonzero
 	// destination address, route using that address.
-	if e.hdrIncluded {
+	if e.ops.GetHeaderIncluded() {
 		ip := header.IPv4(payloadBytes)
 		if !ip.IsValid(len(payloadBytes)) {
 			e.mu.RUnlock()
@@ -359,7 +358,7 @@ func (e *endpoint) finishWrite(payloadBytes []byte, route *stack.Route) (int64, 
 		}
 	}
 
-	if e.hdrIncluded {
+	if e.ops.GetHeaderIncluded() {
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 			Data: buffer.View(payloadBytes).ToVectorisedView(),
 		})
@@ -534,18 +533,6 @@ func (e *endpoint) SetSockOpt(opt tcpip.SettableSocketOption) *tcpip.Error {
 	}
 }
 
-// SetSockOptBool implements tcpip.Endpoint.SetSockOptBool.
-func (e *endpoint) SetSockOptBool(opt tcpip.SockOptBool, v bool) *tcpip.Error {
-	switch opt {
-	case tcpip.IPHdrIncludedOption:
-		e.mu.Lock()
-		e.hdrIncluded = v
-		e.mu.Unlock()
-		return nil
-	}
-	return tcpip.ErrUnknownProtocolOption
-}
-
 // SetSockOptInt implements tcpip.Endpoint.SetSockOptInt.
 func (e *endpoint) SetSockOptInt(opt tcpip.SockOptInt, v int) *tcpip.Error {
 	switch opt {
@@ -601,20 +588,6 @@ func (e *endpoint) GetSockOpt(opt tcpip.GettableSocketOption) *tcpip.Error {
 
 	default:
 		return tcpip.ErrUnknownProtocolOption
-	}
-}
-
-// GetSockOptBool implements tcpip.Endpoint.GetSockOptBool.
-func (e *endpoint) GetSockOptBool(opt tcpip.SockOptBool) (bool, *tcpip.Error) {
-	switch opt {
-	case tcpip.IPHdrIncludedOption:
-		e.mu.Lock()
-		v := e.hdrIncluded
-		e.mu.Unlock()
-		return v, nil
-
-	default:
-		return false, tcpip.ErrUnknownProtocolOption
 	}
 }
 

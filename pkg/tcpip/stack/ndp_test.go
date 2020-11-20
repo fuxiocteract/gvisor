@@ -2843,9 +2843,7 @@ func addrForNewConnectionTo(t *testing.T, s *stack.Stack, addr tcpip.FullAddress
 		t.Fatalf("s.NewEndpoint(%d, %d, _): %s", header.UDPProtocolNumber, header.IPv6ProtocolNumber, err)
 	}
 	defer ep.Close()
-	if err := ep.SetSockOptBool(tcpip.V6OnlyOption, true); err != nil {
-		t.Fatalf("SetSockOpt(tcpip.V6OnlyOption, true): %s", err)
-	}
+	ep.SocketOptions().SetV6Only(true)
 	if err := ep.Connect(addr); err != nil {
 		t.Fatalf("ep.Connect(%+v): %s", addr, err)
 	}
@@ -2879,9 +2877,7 @@ func addrForNewConnectionWithAddr(t *testing.T, s *stack.Stack, addr tcpip.FullA
 		t.Fatalf("s.NewEndpoint(%d, %d, _): %s", header.UDPProtocolNumber, header.IPv6ProtocolNumber, err)
 	}
 	defer ep.Close()
-	if err := ep.SetSockOptBool(tcpip.V6OnlyOption, true); err != nil {
-		t.Fatalf("SetSockOpt(tcpip.V6OnlyOption, true): %s", err)
-	}
+	ep.SocketOptions().SetV6Only(true)
 	if err := ep.Bind(addr); err != nil {
 		t.Fatalf("ep.Bind(%+v): %s", addr, err)
 	}
@@ -3250,9 +3246,7 @@ func TestAutoGenAddrJobDeprecation(t *testing.T) {
 				t.Fatalf("s.NewEndpoint(%d, %d, _): %s", header.UDPProtocolNumber, header.IPv6ProtocolNumber, err)
 			}
 			defer ep.Close()
-			if err := ep.SetSockOptBool(tcpip.V6OnlyOption, true); err != nil {
-				t.Fatalf("SetSockOpt(tcpip.V6OnlyOption, true): %s", err)
-			}
+			ep.SocketOptions().SetV6Only(true)
 
 			if err := ep.Connect(dstAddr); err != tcpip.ErrNoRoute {
 				t.Errorf("got ep.Connect(%+v) = %s, want = %s", dstAddr, err, tcpip.ErrNoRoute)

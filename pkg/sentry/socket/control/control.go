@@ -359,6 +359,17 @@ func PackIPPacketInfo(t *kernel.Task, packetInfo tcpip.IPPacketInfo, buf []byte)
 	)
 }
 
+// PackSockExtendedErr packs an IP*_RECVERR socket control message.
+func PackSockExtendedErr(t *kernel.Task, sockErr linux.SockErrCMsg, buf []byte) []byte {
+	return putCmsgStruct(
+		buf,
+		sockErr.CMsgLevel(),
+		sockErr.CMsgType(),
+		t.Arch().Width(),
+		sockErr,
+	)
+}
+
 // PackControlMessages packs control messages into the given buffer.
 //
 // We skip control messages specific to Unix domain sockets.
@@ -385,6 +396,10 @@ func PackControlMessages(t *kernel.Task, cmsgs socket.ControlMessages, buf []byt
 
 	if cmsgs.IP.HasIPPacketInfo {
 		buf = PackIPPacketInfo(t, cmsgs.IP.PacketInfo, buf)
+	}
+
+	if cmsgs.IP.SockErrCMsg != nil {
+		buf = PackSockExtendedErr(t, cmsgs.IP.SockErrCMsg, buf)
 	}
 
 	return buf
@@ -414,6 +429,10 @@ func CmsgsSpace(t *kernel.Task, cmsgs socket.ControlMessages) int {
 
 	if cmsgs.IP.HasTClass {
 		space += cmsgSpace(t, linux.SizeOfControlMessageTClass)
+	}
+
+	if cmsgs.IP.SockErrCMsg != nil {
+		space += cmsgSpace(t, cmsgs.IP.SockErrCMsg.SizeBytes())
 	}
 
 	return space

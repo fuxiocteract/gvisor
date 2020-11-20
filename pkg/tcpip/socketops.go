@@ -15,14 +15,15 @@
 package tcpip
 
 import (
+	"sync"
 	"sync/atomic"
+
+	"gvisor.dev/gvisor/pkg/abi/linux"
 )
 
 // SocketOptionsHandler holds methods that help define endpoint specific
-// behavior for socket options.
-// These must be implemented by endpoints to:
-// - Get notified when socket level options are set.
-// - Provide endpoint specific socket options.
+// behavior for socket level socket options. These must be implemented by
+// endpoints to get notified when socket level options are set.
 type SocketOptionsHandler interface {
 	// OnReuseAddressSet is invoked when SO_REUSEADDR is set for an endpoint.
 	OnReuseAddressSet(v bool)
@@ -33,9 +34,15 @@ type SocketOptionsHandler interface {
 	// OnKeepAliveSet is invoked when SO_KEEPALIVE is set for an endpoint.
 	OnKeepAliveSet(v bool)
 
-	// IsListening is invoked to fetch SO_ACCEPTCONN option value for an
-	// endpoint. It is used to indicate if the socket is a listening socket.
-	IsListening() bool
+	// OnDelayOptionSet is invoked when TCP_NODELAY is set for an endpoint.
+	// Note that v will be the inverse of TCP_NODELAY option.
+	OnDelayOptionSet(v bool)
+
+	// OnCorkOptionSet is invoked when TCP_CORK is set for an endpoint.
+	OnCorkOptionSet(v bool)
+
+	// UpdateLastError updates the endpoint specific last error field.
+	UpdateLastError(err *Error)
 }
 
 // DefaultSocketOptionsHandler is an embeddable type that implements no-op
@@ -53,11 +60,17 @@ func (*DefaultSocketOptionsHandler) OnReusePortSet(bool) {}
 // OnKeepAliveSet implements SocketOptionsHandler.OnKeepAliveSet.
 func (*DefaultSocketOptionsHandler) OnKeepAliveSet(bool) {}
 
-// IsListening implements SocketOptionsHandler.IsListening.
-func (*DefaultSocketOptionsHandler) IsListening() bool { return false }
+// OnDelayOptionSet implements SocketOptionsHandler.OnDelayOptionSet.
+func (*DefaultSocketOptionsHandler) OnDelayOptionSet(bool) {}
 
-// SocketOptions contains all the variables which store values for SOL_SOCKET
-// level options.
+// OnCorkOptionSet implements SocketOptionsHandler.OnCorkOptionSet.
+func (*DefaultSocketOptionsHandler) OnCorkOptionSet(bool) {}
+
+// UpdateLastError implements SocketOptionsHandler.UpdateLastError.
+func (*DefaultSocketOptionsHandler) UpdateLastError(*Error) {}
+
+// SocketOptions contains all the variables which store values for SOL_SOCKET,
+// SOL_IP, SOL_IPV6 and SOL_TCP level options.
 //
 // +stateify savable
 type SocketOptions struct {
@@ -88,6 +101,49 @@ type SocketOptions struct {
 	// keepAliveEnabled determines whether TCP keepalive is enabled for this
 	// socket.
 	keepAliveEnabled uint32
+
+	// multicastLoopEnabled determines whether multicast packets sent over a
+	// non-loopback interface will be looped back. Analogous to inet->mc_loop.
+	multicastLoopEnabled uint32
+
+	// receiveTOSEnabled is used to specify if the TOS ancillary message is
+	// passed with incoming packets.
+	receiveTOSEnabled uint32
+
+	// receiveTClassEnabled is used to specify if the IPV6_TCLASS ancillary
+	// message is passed with incoming packets.
+	receiveTClassEnabled uint32
+
+	// receivePacketInfoEnabled is used to specify if more inforamtion is
+	// provided with incoming packets such as interface index and address.
+	receivePacketInfoEnabled uint32
+
+	// hdrIncludeEnabled is used to indicate for a raw endpoint that all packets
+	// being written have an IP header and the endpoint should not attach an IP
+	// header.
+	hdrIncludedEnabled uint32
+
+	// v6OnlyEnabled is used to determine whether an IPv6 socket is to be
+	// restricted to sending and receiving IPv6 packets only.
+	v6OnlyEnabled uint32
+
+	// quickAckEnabled is used to represent the value of TCP_QUICKACK option.
+	// It currently does not have any effect on the TCP endpoint.
+	quickAckEnabled uint32
+
+	// delayOptionEnabled is used to specify if data should be sent out immediately
+	// by the transport protocol. For TCP, it determines if the Nagle algorithm
+	// is on or off.
+	delayOptionEnabled uint32
+
+	// corkOptionEnabled is used to specify if data should be held until segments
+	// are full by the TCP transport protocol.
+	corkOptionEnabled uint32
+
+	// errQueue is analogous to sock.sk_error_queue in Linux. It is protected
+	// by errQueueMu.
+	errQueue   SockErrorList
+	errQueueMu sync.Mutex `state:"nosave"`
 }
 
 // InitHandler initializes the handler. This must be called before using the
@@ -167,8 +223,134 @@ func (so *SocketOptions) SetKeepAlive(v bool) {
 	so.handler.OnKeepAliveSet(v)
 }
 
-// GetAcceptConn gets value for SO_ACCEPTCONN option.
-func (so *SocketOptions) GetAcceptConn() bool {
-	// This option is completely endpoint dependent and unsettable.
-	return so.handler.IsListening()
+// GetMulticastLoop gets value for IP_MULTICAST_LOOP option.
+func (so *SocketOptions) GetMulticastLoop() bool {
+	return atomic.LoadUint32(&so.multicastLoopEnabled) != 0
+}
+
+// SetMulticastLoop sets value for IP_MULTICAST_LOOP option.
+func (so *SocketOptions) SetMulticastLoop(v bool) {
+	storeAtomicBool(&so.multicastLoopEnabled, v)
+}
+
+// GetReceiveTOS gets value for IP_RECVTOS option.
+func (so *SocketOptions) GetReceiveTOS() bool {
+	return atomic.LoadUint32(&so.receiveTOSEnabled) != 0
+}
+
+// SetReceiveTOS sets value for IP_RECVTOS option.
+func (so *SocketOptions) SetReceiveTOS(v bool) {
+	storeAtomicBool(&so.receiveTOSEnabled, v)
+}
+
+// GetReceiveTClass gets value for IPV6_RECVTCLASS option.
+func (so *SocketOptions) GetReceiveTClass() bool {
+	return atomic.LoadUint32(&so.receiveTClassEnabled) != 0
+}
+
+// SetReceiveTClass sets value for IPV6_RECVTCLASS option.
+func (so *SocketOptions) SetReceiveTClass(v bool) {
+	storeAtomicBool(&so.receiveTClassEnabled, v)
+}
+
+// GetReceivePacketInfo gets value for IP_PKTINFO option.
+func (so *SocketOptions) GetReceivePacketInfo() bool {
+	return atomic.LoadUint32(&so.receivePacketInfoEnabled) != 0
+}
+
+// SetReceivePacketInfo sets value for IP_PKTINFO option.
+func (so *SocketOptions) SetReceivePacketInfo(v bool) {
+	storeAtomicBool(&so.receivePacketInfoEnabled, v)
+}
+
+// GetHeaderIncluded gets value for IP_HDRINCL option.
+func (so *SocketOptions) GetHeaderIncluded() bool {
+	return atomic.LoadUint32(&so.hdrIncludedEnabled) != 0
+}
+
+// SetHeaderIncluded sets value for IP_HDRINCL option.
+func (so *SocketOptions) SetHeaderIncluded(v bool) {
+	storeAtomicBool(&so.hdrIncludedEnabled, v)
+}
+
+// GetV6Only gets value for IPV6_V6ONLY option.
+func (so *SocketOptions) GetV6Only() bool {
+	return atomic.LoadUint32(&so.v6OnlyEnabled) != 0
+}
+
+// SetV6Only sets value for IPV6_V6ONLY option.
+//
+// Preconditions: the backing TCP or UDP endpoint must be in initial state.
+func (so *SocketOptions) SetV6Only(v bool) {
+	storeAtomicBool(&so.v6OnlyEnabled, v)
+}
+
+// GetQuickAck gets value for TCP_QUICKACK option.
+func (so *SocketOptions) GetQuickAck() bool {
+	return atomic.LoadUint32(&so.quickAckEnabled) != 0
+}
+
+// SetQuickAck sets value for TCP_QUICKACK option.
+func (so *SocketOptions) SetQuickAck(v bool) {
+	storeAtomicBool(&so.quickAckEnabled, v)
+}
+
+// GetDelayOption gets inverted value for TCP_NODELAY option.
+func (so *SocketOptions) GetDelayOption() bool {
+	return atomic.LoadUint32(&so.delayOptionEnabled) != 0
+}
+
+// SetDelayOption sets inverted value for TCP_NODELAY option.
+func (so *SocketOptions) SetDelayOption(v bool) {
+	storeAtomicBool(&so.delayOptionEnabled, v)
+	so.handler.OnDelayOptionSet(v)
+}
+
+// GetCorkOption gets value for TCP_CORK option.
+func (so *SocketOptions) GetCorkOption() bool {
+	return atomic.LoadUint32(&so.corkOptionEnabled) != 0
+}
+
+// SetCorkOption sets value for TCP_CORK option.
+func (so *SocketOptions) SetCorkOption(v bool) {
+	storeAtomicBool(&so.corkOptionEnabled, v)
+	so.handler.OnCorkOptionSet(v)
+}
+
+// SockError represents a queue entry in the per-socket error queue.
+type SockError struct {
+	SockErrorEntry
+
+	ErrMsg linux.SockErrCMsg
+	Err    *Error // corresponding tcpip.Error
+
+	// The payload of the original packet that caused the error is passed as
+	// normal data via msg_iovec.  -- recvmsg(2)
+	Payload []byte
+
+	// The original destination address of the datagram that caused the error is
+	// supplied via msg_name.  -- recvmsg(2)
+	DstAddr    linux.SockAddr
+	DstAddrLen uint32
+}
+
+// DequeueErr dequeues a socket extended error from the error queue and returns
+// it. Returns nil if queue is empty. It is loosely analogous to
+// net/core/skbuff.c:sock_dequeue_err_skb().
+func (so *SocketOptions) DequeueErr() *SockError {
+	so.errQueueMu.Lock()
+	defer so.errQueueMu.Unlock()
+
+	err := so.errQueue.Front()
+	if err != nil {
+		so.errQueue.Remove(err)
+		nextErr := so.errQueue.Front()
+
+		if nextErr.ErrMsg.IsICMPErr() {
+			so.handler.UpdateLastError(nextErr.Err)
+		} else if err.ErrMsg.IsICMPErr() {
+			so.handler.UpdateLastError(nil)
+		}
+	}
+	return err
 }
