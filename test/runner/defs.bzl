@@ -12,7 +12,7 @@ def _runner_test_impl(ctx):
         "  mkdir -p \"${TEST_UNDECLARED_OUTPUTS_DIR}\"",
         "  chmod a+rwx \"${TEST_UNDECLARED_OUTPUTS_DIR}\"",
         "fi",
-        "exec %s %s %s\n" % (
+        "exec %s %s \"$@\" %s\n" % (
             ctx.files.runner[0].short_path,
             " ".join(ctx.attr.runner_args),
             ctx.files.test[0].short_path,
