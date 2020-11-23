@@ -43,10 +43,18 @@ install_helper() {
       make install)
 }
 
+# Figure out were btrfs headers are.
+#
+# Ubuntu 16.04 has only btrfs-tools, while 18.04 has a transitional package,
+# and later versions no longer have the transitional package.
+declare BTRFS_DEV
+BTRFS_DEV=$(apt-cache search btrfs | grep -E '^(btrfs-dev|btrfs-tools)$' | head -n 1 | cut -d'-' -f1)
+readonly BTRFS_DEV
+
 # Install dependencies for the crictl tests.
 while true; do
   if (apt-get update && apt-get install -y \
-      btrfs-tools \
+      "${BTRFS_DEV}" \
       libseccomp-dev); then
     break
   fi
