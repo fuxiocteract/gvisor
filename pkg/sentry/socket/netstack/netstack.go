@@ -260,10 +260,6 @@ type commonEndpoint interface {
 	// transport.Endpoint.GetSockOpt.
 	GetSockOptInt(opt tcpip.SockOptInt) (int, *tcpip.Error)
 
-	// LastError implements tcpip.Endpoint.LastError and
-	// transport.Endpoint.LastError.
-	LastError() *tcpip.Error
-
 	// SocketOptions implements tcpip.Endpoint.SocketOptions and
 	// transport.Endpoint.SocketOptions.
 	SocketOptions() *tcpip.SocketOptions
@@ -502,11 +498,7 @@ func (s *socketOpsCommon) Release(ctx context.Context) {
 		return
 	}
 
-	var v tcpip.LingerOption
-	if err := s.Endpoint.GetSockOpt(&v); err != nil {
-		return
-	}
-
+	v := s.Endpoint.SocketOptions().GetLinger()
 	// The case for zero timeout is handled in tcp endpoint close function.
 	// Close is blocked until either:
 	// 1. The endpoint state is not in any of the states: FIN-WAIT1,
@@ -1043,7 +1035,7 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 		}
 
 		// Get the last error and convert it.
-		err := ep.LastError()
+		err := ep.SocketOptions().GetLastError()
 		if err == nil {
 			optP := primitive.Int32(0)
 			return &optP, nil
@@ -1124,10 +1116,7 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 		return &v, nil
 
 	case linux.SO_BINDTODEVICE:
-		var v tcpip.BindToDeviceOption
-		if err := ep.GetSockOpt(&v); err != nil {
-			return nil, syserr.TranslateNetstackError(err)
-		}
+		v := ep.SocketOptions().GetBindToDevice()
 		if v == 0 {
 			var b primitive.ByteSlice
 			return &b, nil
@@ -1170,11 +1159,8 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 			return nil, syserr.ErrInvalidArgument
 		}
 
-		var v tcpip.LingerOption
 		var linger linux.Linger
-		if err := ep.GetSockOpt(&v); err != nil {
-			return nil, syserr.TranslateNetstackError(err)
-		}
+		v := ep.SocketOptions().GetLinger()
 
 		if v.Enabled {
 			linger.OnOff = 1
@@ -1205,13 +1191,8 @@ func getSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, fam
 			return nil, syserr.ErrInvalidArgument
 		}
 
-		var v tcpip.OutOfBandInlineOption
-		if err := ep.GetSockOpt(&v); err != nil {
-			return nil, syserr.TranslateNetstackError(err)
-		}
-
-		vP := primitive.Int32(v)
-		return &vP, nil
+		v := primitive.Int32(boolToInt32(ep.SocketOptions().GetOutOfBandInline()))
+		return &v, nil
 
 	case linux.SO_NO_CHECK:
 		if outLen < sizeOfInt32 {
@@ -1870,8 +1851,8 @@ func setSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, nam
 		}
 		name := string(optVal[:n])
 		if name == "" {
-			v := tcpip.BindToDeviceOption(0)
-			return syserr.TranslateNetstackError(ep.SetSockOpt(&v))
+			ep.SocketOptions().SetBindToDevice(0)
+			return nil
 		}
 		s := t.NetworkContext()
 		if s == nil {
@@ -1879,8 +1860,8 @@ func setSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, nam
 		}
 		for nicID, nic := range s.Interfaces() {
 			if nic.Name == name {
-				v := tcpip.BindToDeviceOption(nicID)
-				return syserr.TranslateNetstackError(ep.SetSockOpt(&v))
+				ep.SocketOptions().SetBindToDevice(nicID)
+				return nil
 			}
 		}
 		return syserr.ErrUnknownDevice
@@ -1949,8 +1930,8 @@ func setSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, nam
 			socket.SetSockOptEmitUnimplementedEvent(t, name)
 		}
 
-		opt := tcpip.OutOfBandInlineOption(v)
-		return syserr.TranslateNetstackError(ep.SetSockOpt(&opt))
+		ep.SocketOptions().SetOutOfBandInline(v != 0)
+		return nil
 
 	case linux.SO_NO_CHECK:
 		if len(optVal) < sizeOfInt32 {
@@ -1973,10 +1954,10 @@ func setSockOptSocket(t *kernel.Task, s socket.SocketOps, ep commonEndpoint, nam
 			socket.SetSockOptEmitUnimplementedEvent(t, name)
 		}
 
-		return syserr.TranslateNetstackError(
-			ep.SetSockOpt(&tcpip.LingerOption{
-				Enabled: v.OnOff != 0,
-				Timeout: time.Second * time.Duration(v.Linger)}))
+		ep.SocketOptions().SetLinger(tcpip.LingerOption{
+			Enabled: v.OnOff != 0,
+			Timeout: time.Second * time.Duration(v.Linger)})
+		return nil
 
 	case linux.SO_DETACH_FILTER:
 		// optval is ignored.
