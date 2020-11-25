@@ -100,7 +100,7 @@ type IPv4Fields struct {
 	//
 	// That leaves ten 32 bit (4 byte) fields for options. An attempt to encode
 	// more will fail.
-	Options IPv4Options
+	Options IPv4OptionsSerializer
 }
 
 // IPv4 is an IPv4 header.
@@ -285,6 +285,14 @@ func (b IPv4) DestinationAddress() tcpip.Address {
 	return tcpip.Address(b[dstAddr : dstAddr+IPv4AddressSize])
 }
 
+// padIPv4OptionsLength returns the total length for IPv4 options of length l
+// after applying padding according to RFC 791:
+//    The internet header padding is used to ensure that the internet
+//    header ends on a 32 bit boundary.
+func padIPv4OptionsLength(l int) int {
+	return (l + IPv4IHLStride - 1) & ^(IPv4IHLStride - 1)
+}
+
 // IPv4Options is a buffer that holds all the raw IP options.
 type IPv4Options []byte
 
@@ -294,7 +302,7 @@ type IPv4Options []byte
 //    The internet header padding is used to ensure that the internet
 //    header ends on a 32 bit boundary.
 func (o IPv4Options) SizeWithPadding() int {
-	return (len(o) + IPv4IHLStride - 1) & ^(IPv4IHLStride - 1)
+	return padIPv4OptionsLength(len(o))
 }
 
 // Options returns a buffer holding the options.
@@ -378,21 +386,10 @@ func (b IPv4) Encode(i *IPv4Fields) {
 	// worth a bit of optimisation here to keep the copy out of the fast path.
 	hdrLen := IPv4MinimumSize
 	if len(i.Options) != 0 {
-		// SizeWithPadding is always >= len(i.Options).
-		aLen := i.Options.SizeWithPadding()
-		hdrLen += aLen
-		if hdrLen > len(b) {
-			panic(fmt.Sprintf("encode received %d bytes, wanted >= %d", len(b), hdrLen))
-		}
-		opts := b[options:]
-		// This avoids bounds checks on the next line(s) which would happen even
-		// if there's no work to do.
-		if n := copy(opts, i.Options); n != aLen {
-			padding := opts[n:][:aLen-n]
-			for i := range padding {
-				padding[i] = 0
-			}
-		}
+		hdrLen += i.Options.Serialize(b[options:])
+	}
+	if hdrLen > IPv4MaximumHeaderSize {
+		panic(fmt.Sprintf("%d is larger than maximum IPv4 header size of %d", hdrLen, IPv4MaximumHeaderSize))
 	}
 	b.SetHeaderLength(uint8(hdrLen))
 	b[tos] = i.TOS
@@ -473,6 +470,10 @@ const (
 	// IPv4OptionNOPType is the No-Operation option. May appear between other
 	// options and may appear multiple times.
 	IPv4OptionNOPType IPv4OptionType = 1
+
+	// IPv4OptionRouterAlertType is the option type for the Router Alert option,
+	// defined in RFC 2113 Section 2.1.
+	IPv4OptionRouterAlertType IPv4OptionType = 20 | 0x80
 
 	// IPv4OptionRecordRouteType is used by each router on the path of the packet
 	// to record its path. It is carried over to an Echo Reply.
@@ -874,3 +875,176 @@ func (rr *IPv4OptionRecordRoute) Size() uint8 { return uint8(len(*rr)) }
 
 // Contents implements IPv4Option.
 func (rr *IPv4OptionRecordRoute) Contents() []byte { return []byte(*rr) }
+
+// Router Alert option specific related constants.
+//
+// from RFC 2113 section 2.1:
+//
+//     +--------+--------+--------+--------+
+//     |10010100|00000100|  2 octet value  |
+//     +--------+--------+--------+--------+
+//
+//     Type:
+//     Copied flag:  1 (all fragments must carry the option)
+//     Option class: 0 (control)
+//     Option number: 20 (decimal)
+//
+//     Length: 4
+//
+//     Value:  A two octet code with the following values:
+//     0 - Router shall examine packet
+//     1-65535 - Reserved
+const (
+	// IPv4OptionRouterAlertLength is the length of a Router Alert option.
+	IPv4OptionRouterAlertLength = 4
+
+	// IPv4OptionRouterAlertValueOffset is the offset for the value of a
+	// RouterAlert option.
+	IPv4OptionRouterAlertValueOffset = 2
+
+	// IPv4OptionRouterAlertValue is the only permissible value of the 16 bit
+	// payload of the router alert option.
+	IPv4OptionRouterAlertValue = 0
+)
+
+// IPv4OptionRouterAlert is an IPv4 Router Alert option defined by RFC 2113.
+type IPv4OptionRouterAlert []byte
+
+// Type implements IPv4Option.
+func (ra *IPv4OptionRouterAlert) Type() IPv4OptionType { return IPv4OptionRouterAlertType }
+
+// Size implements IPv4Option.
+func (ra *IPv4OptionRouterAlert) Size() uint8 { return uint8(len(*ra)) }
+
+// Contents implements IPv4Option.
+func (ra *IPv4OptionRouterAlert) Contents() []byte { return []byte(*ra) }
+
+// IPv4SerializableOption is an interface to represent serializable IPv4 option
+// types.
+type IPv4SerializableOption interface {
+	// Type returns the type identifier of the option.
+	Type() IPv4OptionType
+
+	// Length returns the *payload* size of the option (not considering the type
+	// and length fields).
+	Length() uint8
+
+	// SerializeInto serializes the receiver into the provided byte
+	// buffer.
+	//
+	// Note, the caller MUST provide a byte buffer with size of at least
+	// Length. Implementers of this function may assume that the byte buffer
+	// is of sufficient size. SerializeInto MAY panic if the provided byte
+	// buffer is not of sufficient size.
+	//
+	// SerializeInto will return the number of bytes that was used to
+	// serialize the receiver. Implementers must only use the number of
+	// bytes required to serialize the receiver. Callers MAY provide a
+	// larger buffer than required to serialize into.
+	SerializeInto(buffer []byte) int
+}
+
+// IPv4OptionsSerializer is a serializer for IPv4 options.
+type IPv4OptionsSerializer []IPv4SerializableOption
+
+// Length returns the total number of bytes required to serialize the options.
+func (s IPv4OptionsSerializer) Length() int {
+	var total int
+	for _, opt := range s {
+		total++
+		switch opt.Type() {
+		// NOP and ListEnd types are always single-byte.
+		case IPv4OptionNOPType, IPv4OptionListEndType:
+			continue
+		}
+		total += 1 + int(opt.Length())
+	}
+	return padIPv4OptionsLength(total)
+}
+
+// Serialize serializes the provided list of IPV4 options into b.
+//
+// Note, b must be of sufficient size to hold all the options in s. See
+// IPv4OptionsSerializer.Length for details on the getting the total size
+// of a serialized IPv4OptionsSerializer.
+//
+// Serialize may panic if b is not of sufficient size to hold all the options
+// in s.
+func (s IPv4OptionsSerializer) Serialize(b []byte) int {
+	var offset int
+	for _, opt := range s {
+		ty := opt.Type()
+		b[offset] = byte(ty)
+		offset++
+		switch ty {
+		// NOP and ListEnd types are always single-byte.
+		case IPv4OptionListEndType, IPv4OptionNOPType:
+			continue
+		}
+		b[offset] = 2 + opt.Length()
+		offset++
+		offset += opt.SerializeInto(b[offset:])
+	}
+	padded := padIPv4OptionsLength(offset)
+	for i := offset; i < padded; i++ {
+		b[offset] = byte(IPv4OptionListEndType)
+	}
+	return padded
+}
+
+// IPv4SerializableRouterAlertOption provides serialization of the Router Alert
+// IPv4 option according to RFC 2113.
+type IPv4SerializableRouterAlertOption struct{}
+
+// Type implements IPv4SerializableOption.
+func (o *IPv4SerializableRouterAlertOption) Type() IPv4OptionType {
+	return IPv4OptionRouterAlertType
+}
+
+// Length implements IPv4SerializableOption.
+func (o *IPv4SerializableRouterAlertOption) Length() uint8 {
+	return IPv4OptionRouterAlertLength - IPv4OptionRouterAlertValueOffset
+}
+
+// SerializeInto implements IPv4SerializableOption.
+func (o *IPv4SerializableRouterAlertOption) SerializeInto(buffer []byte) int {
+	binary.BigEndian.PutUint16(buffer, IPv4OptionRouterAlertValue)
+	return int(o.Length())
+}
+
+// IPv4SerializableNOPOption provides serialization for the IPv4 no-op option.
+type IPv4SerializableNOPOption struct{}
+
+// Type implements IPv4SerializableOption.
+func (o *IPv4SerializableNOPOption) Type() IPv4OptionType {
+	return IPv4OptionNOPType
+}
+
+// Length implements IPv4SerializableOption.
+func (o *IPv4SerializableNOPOption) Length() uint8 {
+	panic("NOP option does not have a payload")
+}
+
+// SerializeInto implements IPv4SerializableOption.
+func (o *IPv4SerializableNOPOption) SerializeInto([]byte) int {
+	panic("NOP option does not have a payload")
+}
+
+// IPv4SerializableListEndOption provides serialization for the IPv4 List End
+// option.
+type IPv4SerializableListEndOption struct{}
+
+// Type implements IPv4SerializableOption.
+func (o *IPv4SerializableListEndOption) Type() IPv4OptionType {
+	return IPv4OptionListEndType
+}
+
+// Length implements IPv4SerializableOption.
+func (o *IPv4SerializableListEndOption) Length() uint8 {
+	panic("ListEnd option does not have a payload")
+}
+
+// SerializeInto implements IPv4SerializableOption.
+func (o *IPv4SerializableListEndOption) SerializeInto([]byte) int {
+	panic("ListEnd option does not have a payload")
+}

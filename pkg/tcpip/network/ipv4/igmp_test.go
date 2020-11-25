@@ -42,6 +42,7 @@ func validateIgmpPacket(t *testing.T, p channel.PacketInfo, remoteAddress tcpip.
 	payload := header.IPv4(stack.PayloadSince(p.Pkt.NetworkHeader()))
 	checker.IPv4(t, payload,
 		checker.DstAddr(remoteAddress),
+		checker.IPv4RouterAlert(),
 		checker.IGMP(
 			checker.IGMPType(igmpType),
 			checker.IGMPMaxRespTime(header.DecisecondToDuration(maxRespTime)),

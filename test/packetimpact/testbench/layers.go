@@ -323,10 +323,6 @@ func (l *IPv4) ToBytes() ([]byte, error) {
 		DstAddr:        tcpip.Address(""),
 		Options:        nil,
 	}
-	// Leave an empty options slice as nil.
-	if hdrLen > header.IPv4MinimumSize {
-		fields.Options = *l.Options
-	}
 	if l.TOS != nil {
 		fields.TOS = *l.TOS
 	}
@@ -373,18 +369,29 @@ func (l *IPv4) ToBytes() ([]byte, error) {
 	if l.DstAddr != nil {
 		fields.DstAddr = *l.DstAddr
 	}
-	if l.Checksum != nil {
-		fields.Checksum = *l.Checksum
-	}
+
 	h.Encode(fields)
-	if l.Checksum == nil {
-		h.SetChecksum(^h.CalculateChecksum())
+
+	// Put raw option bytes from test definition in header.
+	if l.Options != nil {
+		h.SetHeaderLength(h.HeaderLength() + uint8(len(*l.Options)))
+		if got, want := copy(h.Options(), *l.Options), len(*l.Options); got != want {
+			return nil, fmt.Errorf("failed to copy option bytes into header, got %d want %d", got, want)
+		}
 	}
+
 	// Encode cannot set this incorrectly so we need to overwrite what it wrote
 	// in order to test handling of a bad IHL value.
 	if l.IHL != nil {
 		h.SetHeaderLength(*l.IHL)
 	}
+
+	if l.Checksum == nil {
+		h.SetChecksum(^h.CalculateChecksum())
+	} else {
+		h.SetChecksum(*l.Checksum)
+	}
+
 	return h, nil
 }
 
