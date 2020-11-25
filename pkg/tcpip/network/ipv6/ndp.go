@@ -782,7 +782,7 @@ func (ndp *ndpState) sendDADPacket(addr tcpip.Address, addressEndpoint stack.Add
 		Data:               buffer.View(icmpData).ToVectorisedView(),
 	})
 
-	sent := r.Stats().ICMP.V6PacketsSent
+	sent := r.Stats().ICMP.V6.PacketsSent
 	if err := r.WritePacket(nil,
 		stack.NetworkHeaderParams{
 			Protocol: header.ICMPv6ProtocolNumber,
@@ -1953,7 +1953,7 @@ func (ndp *ndpState) startSolicitingRouters() {
 			Data:               buffer.View(icmpData).ToVectorisedView(),
 		})
 
-		sent := r.Stats().ICMP.V6PacketsSent
+		sent := r.Stats().ICMP.V6.PacketsSent
 		if err := r.WritePacket(nil,
 			stack.NetworkHeaderParams{
 				Protocol: header.ICMPv6ProtocolNumber,
