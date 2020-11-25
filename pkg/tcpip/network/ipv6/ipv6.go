@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"reflect"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -73,6 +74,7 @@ type endpoint struct {
 	dispatcher    stack.TransportDispatcher
 	protocol      *protocol
 	stack         *stack.Stack
+	stats         Stats
 
 	// enabled is set to 1 when the endpoint is enabled and 0 when it is
 	// disabled.
@@ -452,6 +454,7 @@ func (e *endpoint) WritePacket(r *stack.Route, gso *stack.GSO, params stack.Netw
 	if ok := e.protocol.stack.IPTables().Check(stack.Output, pkt, gso, r, "", nicName); !ok {
 		// iptables is telling us to drop the packet.
 		e.protocol.stack.Stats().IP.IPTablesOutputDropped.Increment()
+		e.stats.IP.IPTablesOutputDropped.Increment()
 		return nil
 	}
 
@@ -494,9 +497,12 @@ func (e *endpoint) writePacket(r *stack.Route, gso *stack.GSO, pkt *stack.Packet
 		return nil
 	}
 
+	stats := r.Stats().IP
+	statsEP := e.stats.IP
 	networkMTU, err := calculateNetworkMTU(e.nic.MTU(), uint32(pkt.NetworkHeader().View().Size()))
 	if err != nil {
-		r.Stats().IP.OutgoingPacketErrors.Increment()
+		stats.OutgoingPacketErrors.Increment()
+		statsEP.OutgoingPacketErrors.Increment()
 		return err
 	}
 
@@ -508,17 +514,21 @@ func (e *endpoint) writePacket(r *stack.Route, gso *stack.GSO, pkt *stack.Packet
 			// WritePackets(). It'll be faster but cost more memory.
 			return e.nic.WritePacket(r, gso, ProtocolNumber, fragPkt)
 		})
-		r.Stats().IP.PacketsSent.IncrementBy(uint64(sent))
-		r.Stats().IP.OutgoingPacketErrors.IncrementBy(uint64(remain))
+		stats.PacketsSent.IncrementBy(uint64(sent))
+		statsEP.PacketsSent.IncrementBy(uint64(sent))
+		stats.OutgoingPacketErrors.IncrementBy(uint64(remain))
+		statsEP.OutgoingPacketErrors.IncrementBy(uint64(remain))
 		return err
 	}
 
 	if err := e.nic.WritePacket(r, gso, ProtocolNumber, pkt); err != nil {
-		r.Stats().IP.OutgoingPacketErrors.Increment()
+		stats.OutgoingPacketErrors.Increment()
+		statsEP.OutgoingPacketErrors.Increment()
 		return err
 	}
 
-	r.Stats().IP.PacketsSent.Increment()
+	stats.PacketsSent.Increment()
+	statsEP.PacketsSent.Increment()
 	return nil
 }
 
@@ -531,13 +541,16 @@ func (e *endpoint) WritePackets(r *stack.Route, gso *stack.GSO, pkts stack.Packe
 		return pkts.Len(), nil
 	}
 
+	stats := r.Stats().IP
+	statsEP := e.stats.IP
 	linkMTU := e.nic.MTU()
 	for pb := pkts.Front(); pb != nil; pb = pb.Next() {
 		e.addIPHeader(r.LocalAddress, r.RemoteAddress, pb, params)
 
 		networkMTU, err := calculateNetworkMTU(linkMTU, uint32(pb.NetworkHeader().View().Size()))
 		if err != nil {
-			r.Stats().IP.OutgoingPacketErrors.IncrementBy(uint64(pkts.Len()))
+			stats.OutgoingPacketErrors.IncrementBy(uint64(pkts.Len()))
+			statsEP.OutgoingPacketErrors.IncrementBy(uint64(pkts.Len()))
 			return 0, err
 		}
 		if packetMustBeFragmented(pb, networkMTU, gso) {
@@ -550,7 +563,8 @@ func (e *endpoint) WritePackets(r *stack.Route, gso *stack.GSO, pkts stack.Packe
 				pb = fragPkt
 				return nil
 			}); err != nil {
-				r.Stats().IP.OutgoingPacketErrors.IncrementBy(uint64(pkts.Len()))
+				stats.OutgoingPacketErrors.IncrementBy(uint64(pkts.Len()))
+				statsEP.OutgoingPacketErrors.IncrementBy(uint64(pkts.Len()))
 				return 0, err
 			}
 			// Remove the packet that was just fragmented and process the rest.
@@ -566,13 +580,16 @@ func (e *endpoint) WritePackets(r *stack.Route, gso *stack.GSO, pkts stack.Packe
 		// Fast path: If no packets are to be dropped then we can just invoke the
 		// faster WritePackets API directly.
 		n, err := e.nic.WritePackets(r, gso, pkts, ProtocolNumber)
-		r.Stats().IP.PacketsSent.IncrementBy(uint64(n))
+		stats.PacketsSent.IncrementBy(uint64(n))
+		statsEP.PacketsSent.IncrementBy(uint64(n))
 		if err != nil {
-			r.Stats().IP.OutgoingPacketErrors.IncrementBy(uint64(pkts.Len() - n))
+			stats.OutgoingPacketErrors.IncrementBy(uint64(pkts.Len() - n))
+			statsEP.OutgoingPacketErrors.IncrementBy(uint64(pkts.Len() - n))
 		}
 		return n, err
 	}
-	r.Stats().IP.IPTablesOutputDropped.IncrementBy(uint64(len(dropped)))
+	stats.IPTablesOutputDropped.IncrementBy(uint64(len(dropped)))
+	statsEP.IPTablesOutputDropped.IncrementBy(uint64(len(dropped)))
 
 	// Slow path as we are dropping some packets in the batch degrade to
 	// emitting one packet at a time.
@@ -596,8 +613,10 @@ func (e *endpoint) WritePackets(r *stack.Route, gso *stack.GSO, pkts stack.Packe
 			}
 		}
 		if err := e.nic.WritePacket(r, gso, ProtocolNumber, pkt); err != nil {
-			r.Stats().IP.PacketsSent.IncrementBy(uint64(n))
-			r.Stats().IP.OutgoingPacketErrors.IncrementBy(uint64(pkts.Len() - n + len(dropped)))
+			stats.PacketsSent.IncrementBy(uint64(n))
+			statsEP.PacketsSent.IncrementBy(uint64(n))
+			stats.OutgoingPacketErrors.IncrementBy(uint64(pkts.Len() - n + len(dropped)))
+			statsEP.OutgoingPacketErrors.IncrementBy(uint64(pkts.Len() - n + len(dropped)))
 			// Dropped packets aren't errors, so include them in
 			// the return value.
 			return n + len(dropped), err
@@ -605,7 +624,8 @@ func (e *endpoint) WritePackets(r *stack.Route, gso *stack.GSO, pkts stack.Packe
 		n++
 	}
 
-	r.Stats().IP.PacketsSent.IncrementBy(uint64(n))
+	stats.PacketsSent.IncrementBy(uint64(n))
+	statsEP.PacketsSent.IncrementBy(uint64(n))
 	// Dropped packets aren't errors, so include them in the return value.
 	return n + len(dropped), nil
 }
@@ -699,11 +719,15 @@ func (e *endpoint) forwardPacket(pkt *stack.PacketBuffer) *tcpip.Error {
 // HandlePacket is called by the link layer when new ipv6 packets arrive for
 // this endpoint.
 func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
-	stats := e.protocol.stack.Stats()
-	stats.IP.PacketsReceived.Increment()
+	stats := e.protocol.stack.Stats().IP
+	statsEP := e.stats.IP
+
+	stats.PacketsReceived.Increment()
+	statsEP.PacketsReceived.Increment()
 
 	if !e.isEnabled() {
-		stats.IP.DisabledPacketsReceived.Increment()
+		stats.DisabledPacketsReceived.Increment()
+		statsEP.DisabledPacketsReceived.Increment()
 		return
 	}
 
@@ -711,7 +735,8 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 	if !e.nic.IsLoopback() {
 		if ok := e.protocol.stack.IPTables().Check(stack.Prerouting, pkt, nil, nil, e.MainAddress().Address, ""); !ok {
 			// iptables is telling us to drop the packet.
-			stats.IP.IPTablesPreroutingDropped.Increment()
+			stats.IPTablesPreroutingDropped.Increment()
+			statsEP.IPTablesPreroutingDropped.Increment()
 			return
 		}
 	}
@@ -723,11 +748,13 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 // iptables hook.
 func (e *endpoint) handlePacket(pkt *stack.PacketBuffer) {
 	pkt.NICID = e.nic.ID()
-	stats := e.protocol.stack.Stats()
+	stats := e.protocol.stack.Stats().IP
+	statsEP := e.stats.IP
 
 	h := header.IPv6(pkt.NetworkHeader().View())
 	if !h.IsValid(pkt.Data.Size() + pkt.NetworkHeader().View().Size() + pkt.TransportHeader().View().Size()) {
-		stats.IP.MalformedPacketsReceived.Increment()
+		stats.MalformedPacketsReceived.Increment()
+		statsEP.MalformedPacketsReceived.Increment()
 		return
 	}
 	srcAddr := h.SourceAddress()
@@ -737,7 +764,8 @@ func (e *endpoint) handlePacket(pkt *stack.PacketBuffer) {
 	//   Multicast addresses must not be used as source addresses in IPv6
 	//   packets or appear in any Routing header.
 	if header.IsV6MulticastAddress(srcAddr) {
-		stats.IP.InvalidSourceAddressesReceived.Increment()
+		stats.InvalidSourceAddressesReceived.Increment()
+		statsEP.InvalidSourceAddressesReceived.Increment()
 		return
 	}
 
@@ -747,7 +775,8 @@ func (e *endpoint) handlePacket(pkt *stack.PacketBuffer) {
 		addressEndpoint.DecRef()
 	} else if !e.IsInGroup(dstAddr) {
 		if !e.protocol.Forwarding() {
-			stats.IP.InvalidDestinationAddressesReceived.Increment()
+			stats.InvalidDestinationAddressesReceived.Increment()
+			statsEP.InvalidDestinationAddressesReceived.Increment()
 			return
 		}
 
@@ -769,7 +798,8 @@ func (e *endpoint) handlePacket(pkt *stack.PacketBuffer) {
 	// this machine and need not be forwarded.
 	if ok := e.protocol.stack.IPTables().Check(stack.Input, pkt, nil, nil, "", ""); !ok {
 		// iptables is telling us to drop the packet.
-		stats.IP.IPTablesInputDropped.Increment()
+		stats.IPTablesInputDropped.Increment()
+		statsEP.IPTablesInputDropped.Increment()
 		return
 	}
 
@@ -779,7 +809,8 @@ func (e *endpoint) handlePacket(pkt *stack.PacketBuffer) {
 		previousHeaderStart := it.HeaderOffset()
 		extHdr, done, err := it.Next()
 		if err != nil {
-			stats.IP.MalformedPacketsReceived.Increment()
+			stats.MalformedPacketsReceived.Increment()
+			statsEP.MalformedPacketsReceived.Increment()
 			return
 		}
 		if done {
@@ -803,7 +834,8 @@ func (e *endpoint) handlePacket(pkt *stack.PacketBuffer) {
 			for {
 				opt, done, err := optsIt.Next()
 				if err != nil {
-					stats.IP.MalformedPacketsReceived.Increment()
+					stats.MalformedPacketsReceived.Increment()
+					statsEP.MalformedPacketsReceived.Increment()
 					return
 				}
 				if done {
@@ -892,8 +924,10 @@ func (e *endpoint) handlePacket(pkt *stack.PacketBuffer) {
 				for {
 					it, done, err := it.Next()
 					if err != nil {
-						stats.IP.MalformedPacketsReceived.Increment()
-						stats.IP.MalformedFragmentsReceived.Increment()
+						stats.MalformedPacketsReceived.Increment()
+						statsEP.MalformedPacketsReceived.Increment()
+						stats.MalformedFragmentsReceived.Increment()
+						statsEP.MalformedFragmentsReceived.Increment()
 						return
 					}
 					if done {
@@ -920,8 +954,10 @@ func (e *endpoint) handlePacket(pkt *stack.PacketBuffer) {
 				switch lastHdr.(type) {
 				case header.IPv6RawPayloadHeader:
 				default:
-					stats.IP.MalformedPacketsReceived.Increment()
-					stats.IP.MalformedFragmentsReceived.Increment()
+					stats.MalformedPacketsReceived.Increment()
+					statsEP.MalformedPacketsReceived.Increment()
+					stats.MalformedFragmentsReceived.Increment()
+					statsEP.MalformedFragmentsReceived.Increment()
 					return
 				}
 			}
@@ -929,8 +965,10 @@ func (e *endpoint) handlePacket(pkt *stack.PacketBuffer) {
 			fragmentPayloadLen := rawPayload.Buf.Size()
 			if fragmentPayloadLen == 0 {
 				// Drop the packet as it's marked as a fragment but has no payload.
-				stats.IP.MalformedPacketsReceived.Increment()
-				stats.IP.MalformedFragmentsReceived.Increment()
+				stats.MalformedPacketsReceived.Increment()
+				statsEP.MalformedPacketsReceived.Increment()
+				stats.MalformedFragmentsReceived.Increment()
+				statsEP.MalformedFragmentsReceived.Increment()
 				return
 			}
 
@@ -943,8 +981,10 @@ func (e *endpoint) handlePacket(pkt *stack.PacketBuffer) {
 			//    of the fragment, pointing to the Payload Length field of the
 			//    fragment packet.
 			if extHdr.More() && fragmentPayloadLen%header.IPv6FragmentExtHdrFragmentOffsetBytesPerUnit != 0 {
-				stats.IP.MalformedPacketsReceived.Increment()
-				stats.IP.MalformedFragmentsReceived.Increment()
+				stats.MalformedPacketsReceived.Increment()
+				statsEP.MalformedPacketsReceived.Increment()
+				stats.MalformedFragmentsReceived.Increment()
+				statsEP.MalformedFragmentsReceived.Increment()
 				_ = e.protocol.returnError(&icmpReasonParameterProblem{
 					code:    header.ICMPv6ErroneousHeader,
 					pointer: header.IPv6PayloadLenOffset,
@@ -964,8 +1004,10 @@ func (e *endpoint) handlePacket(pkt *stack.PacketBuffer) {
 			//    the fragment, pointing to the Fragment Offset field of the fragment
 			//    packet.
 			if int(start)+fragmentPayloadLen > header.IPv6MaximumPayloadSize {
-				stats.IP.MalformedPacketsReceived.Increment()
-				stats.IP.MalformedFragmentsReceived.Increment()
+				stats.MalformedPacketsReceived.Increment()
+				statsEP.MalformedPacketsReceived.Increment()
+				stats.MalformedFragmentsReceived.Increment()
+				statsEP.MalformedFragmentsReceived.Increment()
 				_ = e.protocol.returnError(&icmpReasonParameterProblem{
 					code:    header.ICMPv6ErroneousHeader,
 					pointer: fragmentFieldOffset,
@@ -990,8 +1032,10 @@ func (e *endpoint) handlePacket(pkt *stack.PacketBuffer) {
 				pkt,
 			)
 			if err != nil {
-				stats.IP.MalformedPacketsReceived.Increment()
-				stats.IP.MalformedFragmentsReceived.Increment()
+				stats.MalformedPacketsReceived.Increment()
+				statsEP.MalformedPacketsReceived.Increment()
+				stats.MalformedFragmentsReceived.Increment()
+				statsEP.MalformedFragmentsReceived.Increment()
 				return
 			}
 
@@ -1011,7 +1055,8 @@ func (e *endpoint) handlePacket(pkt *stack.PacketBuffer) {
 			for {
 				opt, done, err := optsIt.Next()
 				if err != nil {
-					stats.IP.MalformedPacketsReceived.Increment()
+					stats.MalformedPacketsReceived.Increment()
+					statsEP.MalformedPacketsReceived.Increment()
 					return
 				}
 				if done {
@@ -1061,12 +1106,14 @@ func (e *endpoint) handlePacket(pkt *stack.PacketBuffer) {
 			extHdr.Buf.TrimFront(pkt.TransportHeader().View().Size())
 			pkt.Data = extHdr.Buf
 
-			stats.IP.PacketsDelivered.Increment()
+			stats.PacketsDelivered.Increment()
+			statsEP.PacketsDelivered.Increment()
 			if p := tcpip.TransportProtocolNumber(extHdr.Identifier); p == header.ICMPv6ProtocolNumber {
 				pkt.TransportProtocolNumber = p
 				e.handleICMP(pkt, hasFragmentHeader)
 			} else {
-				stats.IP.PacketsDelivered.Increment()
+				stats.PacketsDelivered.Increment()
+				statsEP.PacketsDelivered.Increment()
 				switch res := e.dispatcher.DeliverTransportPacket(p, pkt); res {
 				case stack.TransportPacketHandled:
 				case stack.TransportPacketDestinationPortUnreachable:
@@ -1131,7 +1178,7 @@ func (e *endpoint) Close() {
 	e.mu.addressableEndpointState.Cleanup()
 	e.mu.Unlock()
 
-	e.protocol.forgetEndpoint(e)
+	e.protocol.forgetEndpoint(e, e.nic.ID())
 }
 
 // NetworkProtocolNumber implements stack.NetworkEndpoint.NetworkProtocolNumber.
@@ -1448,6 +1495,30 @@ func (e *endpoint) IsInGroup(addr tcpip.Address) bool {
 	return e.mu.addressableEndpointState.IsInGroup(addr)
 }
 
+// Stats returns a pointer to the network endpoint stats.
+func (e *endpoint) Stats() stack.NetworkEndpointStats {
+	return &e.stats
+}
+
+var _ stack.NetworkEndpointStats = (*Stats)(nil)
+
+// Stats holds the endpoint statistics.
+type Stats struct {
+	// IP holds the IP statistics of an endpoint.
+	IP tcpip.IPStats
+
+	// ICMPSent holds ICMP statistics of an endpoint.
+	ICMPSent tcpip.ICMPv6SentPacketStats
+
+	// ICMPRecv holds ICMP statistics of an endpoint.
+	ICMPRecv tcpip.ICMPv6ReceivedPacketStats
+}
+
+// IPStats returns the IP stats.
+func (s *Stats) IPStats() *tcpip.IPStats {
+	return &s.IP
+}
+
 var _ stack.ForwardingNetworkProtocol = (*protocol)(nil)
 var _ stack.NetworkProtocol = (*protocol)(nil)
 var _ fragmentation.TimeoutHandler = (*protocol)(nil)
@@ -1459,7 +1530,7 @@ type protocol struct {
 	mu struct {
 		sync.RWMutex
 
-		eps map[*endpoint]struct{}
+		eps map[tcpip.NICID]*endpoint
 	}
 
 	ids    []uint32
@@ -1501,6 +1572,12 @@ func (*protocol) ParseAddresses(v buffer.View) (src, dst tcpip.Address) {
 	return h.SourceAddress(), h.DestinationAddress()
 }
 
+func makeNetStats() Stats {
+	var s Stats
+	tcpip.InitStatCounters(reflect.ValueOf(&s).Elem())
+	return s
+}
+
 // NewEndpoint creates a new ipv6 endpoint.
 func (p *protocol) NewEndpoint(nic stack.NetworkInterface, linkAddrCache stack.LinkAddressCache, nud stack.NUDHandler, dispatcher stack.TransportDispatcher) stack.NetworkEndpoint {
 	e := &endpoint{
@@ -1509,6 +1586,7 @@ func (p *protocol) NewEndpoint(nic stack.NetworkInterface, linkAddrCache stack.L
 		nud:           nud,
 		dispatcher:    dispatcher,
 		protocol:      p,
+		stats:         makeNetStats(),
 	}
 	e.mu.addressableEndpointState.Init(e)
 	e.mu.ndp = ndpState{
@@ -1524,14 +1602,14 @@ func (p *protocol) NewEndpoint(nic stack.NetworkInterface, linkAddrCache stack.L
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.mu.eps[e] = struct{}{}
+	p.mu.eps[nic.ID()] = e
 	return e
 }
 
-func (p *protocol) forgetEndpoint(e *endpoint) {
+func (p *protocol) forgetEndpoint(e *endpoint, nicID tcpip.NICID) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	delete(p.mu.eps, e)
+	delete(p.mu.eps, nicID)
 }
 
 // SetOption implements NetworkProtocol.SetOption.
@@ -1606,7 +1684,7 @@ func (p *protocol) SetForwarding(v bool) {
 		return
 	}
 
-	for ep := range p.mu.eps {
+	for _, ep := range p.mu.eps {
 		ep.transitionForwarding(v)
 	}
 }
@@ -1698,7 +1776,7 @@ func NewProtocolWithOptions(opts Options) stack.NetworkProtocolFactory {
 			hashIV: hashIV,
 		}
 		p.fragmentation = fragmentation.NewFragmentation(header.IPv6FragmentExtHdrFragmentOffsetBytesPerUnit, fragmentation.HighFragThreshold, fragmentation.LowFragThreshold, ReassembleTimeout, s.Clock(), p)
-		p.mu.eps = make(map[*endpoint]struct{})
+		p.mu.eps = make(map[tcpip.NICID]*endpoint)
 		p.SetDefaultTTL(DefaultTTL)
 		return p
 	}

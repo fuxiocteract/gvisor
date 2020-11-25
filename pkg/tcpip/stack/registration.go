@@ -579,6 +579,17 @@ type NetworkEndpoint interface {
 	// NetworkProtocolNumber returns the tcpip.NetworkProtocolNumber for
 	// this endpoint.
 	NetworkProtocolNumber() tcpip.NetworkProtocolNumber
+
+	// Stats returns a reference to the network endpoint stats.
+	Stats() NetworkEndpointStats
+}
+
+// NetworkEndpointStats is the interface implemented by each endpoint stats
+// struct.
+type NetworkEndpointStats interface {
+	// IP return the IP stats of the network endpoint. It is the same across
+	// protocols.
+	IPStats() *tcpip.IPStats
 }
 
 // ForwardingNetworkProtocol is a NetworkProtocol that may forward packets.

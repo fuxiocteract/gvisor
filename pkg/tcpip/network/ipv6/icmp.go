@@ -126,14 +126,18 @@ func getTargetLinkAddr(it header.NDPOptionIterator) (tcpip.LinkAddress, bool) {
 
 func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 	stats := e.protocol.stack.Stats().ICMP
-	sent := stats.V6PacketsSent
-	received := stats.V6PacketsReceived
+	statsEP := e.stats
+	sent := stats.V6.PacketsSent
+	sentEP := statsEP.ICMPSent
+	received := stats.V6.PacketsReceived
+	receivedEP := statsEP.ICMPRecv
 	// TODO(gvisor.dev/issue/170): ICMP packets don't have their
 	// TransportHeader fields set. See icmp/protocol.go:protocol.Parse for a
 	// full explanation.
 	v, ok := pkt.Data.PullUp(header.ICMPv6HeaderSize)
 	if !ok {
 		received.Invalid.Increment()
+		receivedEP.Invalid.Increment()
 		return
 	}
 	h := header.ICMPv6(v)
@@ -148,6 +152,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 	payload.TrimFront(len(h))
 	if got, want := h.Checksum(), header.ICMPv6Checksum(h, srcAddr, dstAddr, payload); got != want {
 		received.Invalid.Increment()
+		receivedEP.Invalid.Increment()
 		return
 	}
 
@@ -166,9 +171,11 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 	switch icmpType := h.Type(); icmpType {
 	case header.ICMPv6PacketTooBig:
 		received.PacketTooBig.Increment()
+		receivedEP.PacketTooBig.Increment()
 		hdr, ok := pkt.Data.PullUp(header.ICMPv6PacketTooBigMinimumSize)
 		if !ok {
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 		pkt.Data.TrimFront(header.ICMPv6PacketTooBigMinimumSize)
@@ -180,9 +187,11 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 
 	case header.ICMPv6DstUnreachable:
 		received.DstUnreachable.Increment()
+		receivedEP.DstUnreachable.Increment()
 		hdr, ok := pkt.Data.PullUp(header.ICMPv6DstUnreachableMinimumSize)
 		if !ok {
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 		pkt.Data.TrimFront(header.ICMPv6DstUnreachableMinimumSize)
@@ -195,8 +204,10 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 
 	case header.ICMPv6NeighborSolicit:
 		received.NeighborSolicit.Increment()
+		receivedEP.NeighborSolicit.Increment()
 		if !isNDPValid() || pkt.Data.Size() < header.ICMPv6NeighborSolicitMinimumSize {
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 
@@ -211,6 +222,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 		// address.
 		if header.IsV6MulticastAddress(targetAddr) {
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 
@@ -264,12 +276,14 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 				// Options are not valid as per the wire format, silently drop the
 				// packet.
 				received.Invalid.Increment()
+				receivedEP.Invalid.Increment()
 				return
 			}
 
 			sourceLinkAddr, ok = getSourceLinkAddr(it)
 			if !ok {
 				received.Invalid.Increment()
+				receivedEP.Invalid.Increment()
 				return
 			}
 		}
@@ -283,10 +297,12 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 		if len(sourceLinkAddr) == 0 {
 			if header.IsV6MulticastAddress(dstAddr) && !unspecifiedSource {
 				received.Invalid.Increment()
+				receivedEP.Invalid.Increment()
 				return
 			}
 		} else if unspecifiedSource {
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		} else if e.nud != nil {
 			e.nud.HandleProbe(srcAddr, header.IPv6ProtocolNumber, sourceLinkAddr, e.protocol)
@@ -302,6 +318,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 		//      destination address is a solicited-node multicast address.
 		if unspecifiedSource && !header.IsSolicitedNodeAddr(dstAddr) {
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 
@@ -380,14 +397,18 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 		// could not possibly have been forwarded by a router.
 		if err := r.WritePacket(nil /* gso */, stack.NetworkHeaderParams{Protocol: header.ICMPv6ProtocolNumber, TTL: header.NDPHopLimit, TOS: stack.DefaultTOS}, pkt); err != nil {
 			sent.Dropped.Increment()
+			sentEP.Dropped.Increment()
 			return
 		}
 		sent.NeighborAdvert.Increment()
+		sentEP.NeighborAdvert.Increment()
 
 	case header.ICMPv6NeighborAdvert:
 		received.NeighborAdvert.Increment()
+		receivedEP.NeighborAdvert.Increment()
 		if !isNDPValid() || pkt.Data.Size() < header.ICMPv6NeighborAdvertMinimumSize {
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 
@@ -424,6 +445,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 		if err != nil {
 			// If we have a malformed NDP NA option, drop the packet.
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 
@@ -439,6 +461,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 		targetLinkAddr, ok := getTargetLinkAddr(it)
 		if !ok {
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 
@@ -459,9 +482,11 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 
 	case header.ICMPv6EchoRequest:
 		received.EchoRequest.Increment()
+		receivedEP.EchoRequest.Increment()
 		icmpHdr, ok := pkt.TransportHeader().Consume(header.ICMPv6EchoMinimumSize)
 		if !ok {
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 
@@ -494,26 +519,33 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 			TOS:      stack.DefaultTOS,
 		}, replyPkt); err != nil {
 			sent.Dropped.Increment()
+			sentEP.Dropped.Increment()
 			return
 		}
 		sent.EchoReply.Increment()
+		sentEP.EchoReply.Increment()
 
 	case header.ICMPv6EchoReply:
 		received.EchoReply.Increment()
+		receivedEP.EchoReply.Increment()
 		if pkt.Data.Size() < header.ICMPv6EchoMinimumSize {
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 		e.dispatcher.DeliverTransportPacket(header.ICMPv6ProtocolNumber, pkt)
 
 	case header.ICMPv6TimeExceeded:
 		received.TimeExceeded.Increment()
+		receivedEP.TimeExceeded.Increment()
 
 	case header.ICMPv6ParamProblem:
 		received.ParamProblem.Increment()
+		receivedEP.ParamProblem.Increment()
 
 	case header.ICMPv6RouterSolicit:
 		received.RouterSolicit.Increment()
+		receivedEP.RouterSolicit.Increment()
 
 		//
 		// Validate the RS as per RFC 4861 section 6.1.1.
@@ -522,6 +554,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 		// Is the NDP payload of sufficient size to hold a Router Solictation?
 		if !isNDPValid() || pkt.Data.Size()-header.ICMPv6HeaderSize < header.NDPRSMinimumSize {
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 
@@ -531,6 +564,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 		if !stack.Forwarding(ProtocolNumber) {
 			// ... No, silently drop the packet.
 			received.RouterOnlyPacketsDroppedByHost.Increment()
+			receivedEP.RouterOnlyPacketsDroppedByHost.Increment()
 			return
 		}
 
@@ -541,12 +575,14 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 		if err != nil {
 			// Options are not valid as per the wire format, silently drop the packet.
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 
 		sourceLinkAddr, ok := getSourceLinkAddr(it)
 		if !ok {
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 
@@ -558,6 +594,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 			// Otherwise, it SHOULD be included on link layers that have addresses.
 			if srcAddr == header.IPv6Any {
 				received.Invalid.Increment()
+				receivedEP.Invalid.Increment()
 				return
 			}
 
@@ -570,6 +607,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 
 	case header.ICMPv6RouterAdvert:
 		received.RouterAdvert.Increment()
+		receivedEP.RouterAdvert.Increment()
 
 		//
 		// Validate the RA as per RFC 4861 section 6.1.2.
@@ -578,6 +616,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 		// Is the NDP payload of sufficient size to hold a Router Advertisement?
 		if !isNDPValid() || pkt.Data.Size()-header.ICMPv6HeaderSize < header.NDPRAMinimumSize {
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 
@@ -587,6 +626,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 		if !header.IsV6LinkLocalAddress(routerAddr) {
 			// ...No, silently drop the packet.
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 
@@ -597,12 +637,14 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 		if err != nil {
 			// Options are not valid as per the wire format, silently drop the packet.
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 
 		sourceLinkAddr, ok := getSourceLinkAddr(it)
 		if !ok {
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 
@@ -639,8 +681,10 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 		//    messages, the state SHOULD also be set to STALE to provide prompt
 		//    verification that the path to the new link-layer address is working."
 		received.RedirectMsg.Increment()
+		receivedEP.RedirectMsg.Increment()
 		if !isNDPValid() {
 			received.Invalid.Increment()
+			receivedEP.Invalid.Increment()
 			return
 		}
 
@@ -669,6 +713,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer, hasFragmentHeader bool) {
 
 	default:
 		received.Unrecognized.Increment()
+		receivedEP.Unrecognized.Increment()
 	}
 }
 
@@ -709,7 +754,7 @@ func (p *protocol) LinkAddressRequest(targetAddr, localAddr tcpip.Address, remot
 	ns.Options().Serialize(optsSerializer)
 	packet.SetChecksum(header.ICMPv6Checksum(packet, r.LocalAddress, r.RemoteAddress, buffer.VectorisedView{}))
 
-	stat := p.stack.Stats().ICMP.V6PacketsSent
+	stat := p.stack.Stats().ICMP.V6.PacketsSent
 	if err := r.WritePacket(nil /* gso */, stack.NetworkHeaderParams{
 		Protocol: header.ICMPv6ProtocolNumber,
 		TTL:      header.NDPHopLimit,
@@ -855,10 +900,19 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer) *tcpi
 	}
 	defer route.Release()
 
-	stats := p.stack.Stats().ICMP
-	sent := stats.V6PacketsSent
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	netEP, ok := p.mu.eps[pkt.NICID]
+	if !ok {
+		return tcpip.ErrNotConnected
+	}
+
+	sent := p.stack.Stats().ICMP.V6.PacketsSent
+	sentEP := netEP.Stats().(*Stats).ICMPSent
+
 	if !p.stack.AllowICMPMessage() {
 		sent.RateLimited.Increment()
+		sentEP.RateLimited.Increment()
 		return nil
 	}
 
@@ -913,25 +967,29 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer) *tcpi
 	newPkt.TransportProtocolNumber = header.ICMPv6ProtocolNumber
 
 	icmpHdr := header.ICMPv6(newPkt.TransportHeader().Push(header.ICMPv6DstUnreachableMinimumSize))
-	var counter *tcpip.StatCounter
+	var counter, counterEP *tcpip.StatCounter
 	switch reason := reason.(type) {
 	case *icmpReasonParameterProblem:
 		icmpHdr.SetType(header.ICMPv6ParamProblem)
 		icmpHdr.SetCode(reason.code)
 		icmpHdr.SetTypeSpecific(reason.pointer)
 		counter = sent.ParamProblem
+		counterEP = sentEP.ParamProblem
 	case *icmpReasonPortUnreachable:
 		icmpHdr.SetType(header.ICMPv6DstUnreachable)
 		icmpHdr.SetCode(header.ICMPv6PortUnreachable)
 		counter = sent.DstUnreachable
+		counterEP = sentEP.DstUnreachable
 	case *icmpReasonHopLimitExceeded:
 		icmpHdr.SetType(header.ICMPv6TimeExceeded)
 		icmpHdr.SetCode(header.ICMPv6HopLimitExceeded)
 		counter = sent.TimeExceeded
+		counterEP = sentEP.TimeExceeded
 	case *icmpReasonReassemblyTimeout:
 		icmpHdr.SetType(header.ICMPv6TimeExceeded)
 		icmpHdr.SetCode(header.ICMPv6ReassemblyTimeout)
 		counter = sent.TimeExceeded
+		counterEP = sentEP.TimeExceeded
 	default:
 		panic(fmt.Sprintf("unsupported ICMP type %T", reason))
 	}
@@ -946,9 +1004,11 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer) *tcpi
 		newPkt,
 	); err != nil {
 		sent.Dropped.Increment()
+		sentEP.Dropped.Increment()
 		return err
 	}
 	counter.Increment()
+	counterEP.Increment()
 	return nil
 }
 

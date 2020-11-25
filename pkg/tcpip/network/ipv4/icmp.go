@@ -63,13 +63,16 @@ func (e *endpoint) handleControl(typ stack.ControlType, extra uint32, pkt *stack
 
 func (e *endpoint) handleICMP(pkt *stack.PacketBuffer) {
 	stats := e.protocol.stack.Stats()
-	received := stats.ICMP.V4PacketsReceived
+	statsEP := e.stats
+	received := stats.ICMP.V4.PacketsReceived
+	receivedEP := statsEP.ICMPRecv
 	// TODO(gvisor.dev/issue/170): ICMP packets don't have their
 	// TransportHeader fields set. See icmp/protocol.go:protocol.Parse for a
 	// full explanation.
 	v, ok := pkt.Data.PullUp(header.ICMPv4MinimumSize)
 	if !ok {
 		received.Invalid.Increment()
+		receivedEP.Invalid.Increment()
 		return
 	}
 	h := header.ICMPv4(v)
@@ -77,6 +80,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer) {
 	// Only do in-stack processing if the checksum is correct.
 	if header.ChecksumVV(pkt.Data, 0 /* initial */) != 0xffff {
 		received.Invalid.Increment()
+		receivedEP.Invalid.Increment()
 		// It's possible that a raw socket expects to receive this regardless
 		// of checksum errors. If it's an echo request we know it's safe because
 		// we are the only handler, however other types do not cope well with
@@ -119,6 +123,7 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer) {
 				_ = e.protocol.returnError(&icmpReasonParamProblem{pointer: aux}, pkt)
 				stats.MalformedRcvdPackets.Increment()
 				stats.IP.MalformedPacketsReceived.Increment()
+				statsEP.IP.MalformedPacketsReceived.Increment()
 			}
 			return
 		}
@@ -129,10 +134,13 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer) {
 	switch h.Type() {
 	case header.ICMPv4Echo:
 		received.Echo.Increment()
+		receivedEP.Echo.Increment()
 
-		sent := stats.ICMP.V4PacketsSent
+		sent := stats.ICMP.V4.PacketsSent
+		sentEP := statsEP.ICMPSent
 		if !e.protocol.stack.AllowICMPMessage() {
 			sent.RateLimited.Increment()
+			sentEP.RateLimited.Increment()
 			return
 		}
 
@@ -214,17 +222,21 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer) {
 
 		if err := r.WriteHeaderIncludedPacket(replyPkt); err != nil {
 			sent.Dropped.Increment()
+			sentEP.Dropped.Increment()
 			return
 		}
 		sent.EchoReply.Increment()
+		sentEP.EchoReply.Increment()
 
 	case header.ICMPv4EchoReply:
 		received.EchoReply.Increment()
+		receivedEP.EchoReply.Increment()
 
 		e.dispatcher.DeliverTransportPacket(header.ICMPv4ProtocolNumber, pkt)
 
 	case header.ICMPv4DstUnreachable:
 		received.DstUnreachable.Increment()
+		receivedEP.DstUnreachable.Increment()
 
 		pkt.Data.TrimFront(header.ICMPv4MinimumSize)
 		switch h.Code() {
@@ -244,30 +256,39 @@ func (e *endpoint) handleICMP(pkt *stack.PacketBuffer) {
 
 	case header.ICMPv4SrcQuench:
 		received.SrcQuench.Increment()
+		receivedEP.SrcQuench.Increment()
 
 	case header.ICMPv4Redirect:
 		received.Redirect.Increment()
+		receivedEP.Redirect.Increment()
 
 	case header.ICMPv4TimeExceeded:
 		received.TimeExceeded.Increment()
+		receivedEP.TimeExceeded.Increment()
 
 	case header.ICMPv4ParamProblem:
 		received.ParamProblem.Increment()
+		receivedEP.ParamProblem.Increment()
 
 	case header.ICMPv4Timestamp:
 		received.Timestamp.Increment()
+		receivedEP.Timestamp.Increment()
 
 	case header.ICMPv4TimestampReply:
 		received.TimestampReply.Increment()
+		receivedEP.TimestampReply.Increment()
 
 	case header.ICMPv4InfoRequest:
 		received.InfoRequest.Increment()
+		receivedEP.InfoRequest.Increment()
 
 	case header.ICMPv4InfoReply:
 		received.InfoReply.Increment()
+		receivedEP.InfoReply.Increment()
 
 	default:
 		received.Invalid.Increment()
+		receivedEP.Invalid.Increment()
 	}
 }
 
@@ -379,9 +400,19 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer) *tcpi
 	}
 	defer route.Release()
 
-	sent := p.stack.Stats().ICMP.V4PacketsSent
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	netEP, ok := p.mu.eps[pkt.NICID]
+	if !ok {
+		return tcpip.ErrNotConnected
+	}
+
+	sent := p.stack.Stats().ICMP.V4.PacketsSent
+	sentEP := netEP.Stats().(*Stats).ICMPSent
+
 	if !p.stack.AllowICMPMessage() {
 		sent.RateLimited.Increment()
+		sentEP.RateLimited.Increment()
 		return nil
 	}
 
@@ -471,29 +502,34 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer) *tcpi
 	icmpPkt.TransportProtocolNumber = header.ICMPv4ProtocolNumber
 
 	icmpHdr := header.ICMPv4(icmpPkt.TransportHeader().Push(header.ICMPv4MinimumSize))
-	var counter *tcpip.StatCounter
+	var counter, counterEP *tcpip.StatCounter
 	switch reason := reason.(type) {
 	case *icmpReasonPortUnreachable:
 		icmpHdr.SetType(header.ICMPv4DstUnreachable)
 		icmpHdr.SetCode(header.ICMPv4PortUnreachable)
 		counter = sent.DstUnreachable
+		counterEP = sentEP.DstUnreachable
 	case *icmpReasonProtoUnreachable:
 		icmpHdr.SetType(header.ICMPv4DstUnreachable)
 		icmpHdr.SetCode(header.ICMPv4ProtoUnreachable)
 		counter = sent.DstUnreachable
+		counterEP = sentEP.DstUnreachable
 	case *icmpReasonTTLExceeded:
 		icmpHdr.SetType(header.ICMPv4TimeExceeded)
 		icmpHdr.SetCode(header.ICMPv4TTLExceeded)
 		counter = sent.TimeExceeded
+		counterEP = sentEP.TimeExceeded
 	case *icmpReasonReassemblyTimeout:
 		icmpHdr.SetType(header.ICMPv4TimeExceeded)
 		icmpHdr.SetCode(header.ICMPv4ReassemblyTimeout)
 		counter = sent.TimeExceeded
+		counterEP = sentEP.TimeExceeded
 	case *icmpReasonParamProblem:
 		icmpHdr.SetType(header.ICMPv4ParamProblem)
 		icmpHdr.SetCode(header.ICMPv4UnusedCode)
 		icmpHdr.SetPointer(reason.pointer)
 		counter = sent.ParamProblem
+		counterEP = sentEP.ParamProblem
 	default:
 		panic(fmt.Sprintf("unsupported ICMP type %T", reason))
 	}
@@ -509,9 +545,11 @@ func (p *protocol) returnError(reason icmpReason, pkt *stack.PacketBuffer) *tcpi
 		icmpPkt,
 	); err != nil {
 		sent.Dropped.Increment()
+		sentEP.Dropped.Increment()
 		return err
 	}
 	counter.Increment()
+	counterEP.Increment()
 	return nil
 }
 

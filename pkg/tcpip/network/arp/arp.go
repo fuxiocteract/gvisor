@@ -50,6 +50,7 @@ type endpoint struct {
 	nic           stack.NetworkInterface
 	linkAddrCache stack.LinkAddressCache
 	nud           stack.NUDHandler
+	stats         Stats
 }
 
 func (e *endpoint) Enable() *tcpip.Error {
@@ -201,6 +202,22 @@ func (e *endpoint) HandlePacket(pkt *stack.PacketBuffer) {
 			IsRouter: false,
 		})
 	}
+}
+
+// Stats returns a pointer to the network endpoint stats.
+func (e *endpoint) Stats() stack.NetworkEndpointStats {
+	return &e.stats
+}
+
+var _ stack.NetworkEndpointStats = (*Stats)(nil)
+
+// Stats is needed for endpoint to implement stack.NetworkEndpointStats.
+type Stats struct {
+}
+
+// IPStats implements stack.NetworkEndpointStats.
+func (s *Stats) IPStats() *tcpip.IPStats {
+	return nil
 }
 
 // protocol implements stack.NetworkProtocol and stack.LinkAddressResolver.

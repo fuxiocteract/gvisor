@@ -782,7 +782,8 @@ func (ndp *ndpState) sendDADPacket(addr tcpip.Address, addressEndpoint stack.Add
 		Data:               buffer.View(icmpData).ToVectorisedView(),
 	})
 
-	sent := r.Stats().ICMP.V6PacketsSent
+	sent := r.Stats().ICMP.V6.PacketsSent
+	sentEP := ndp.ep.stats.ICMPSent
 	if err := r.WritePacket(nil,
 		stack.NetworkHeaderParams{
 			Protocol: header.ICMPv6ProtocolNumber,
@@ -790,9 +791,11 @@ func (ndp *ndpState) sendDADPacket(addr tcpip.Address, addressEndpoint stack.Add
 		}, pkt,
 	); err != nil {
 		sent.Dropped.Increment()
+		sentEP.Dropped.Increment()
 		return err
 	}
 	sent.NeighborSolicit.Increment()
+	sentEP.NeighborSolicit.Increment()
 
 	return nil
 }
@@ -1953,7 +1956,8 @@ func (ndp *ndpState) startSolicitingRouters() {
 			Data:               buffer.View(icmpData).ToVectorisedView(),
 		})
 
-		sent := r.Stats().ICMP.V6PacketsSent
+		sent := r.Stats().ICMP.V6.PacketsSent
+		sentEP := ndp.ep.stats.ICMPSent
 		if err := r.WritePacket(nil,
 			stack.NetworkHeaderParams{
 				Protocol: header.ICMPv6ProtocolNumber,
@@ -1961,11 +1965,13 @@ func (ndp *ndpState) startSolicitingRouters() {
 			}, pkt,
 		); err != nil {
 			sent.Dropped.Increment()
+			sentEP.Dropped.Increment()
 			log.Printf("startSolicitingRouters: error writing NDP router solicit message on NIC(%d); err = %s", ndp.ep.nic.ID(), err)
 			// Don't send any more messages if we had an error.
 			remaining = 0
 		} else {
 			sent.RouterSolicit.Increment()
+			sentEP.RouterSolicit.Increment()
 			remaining--
 		}
 
