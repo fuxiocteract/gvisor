@@ -37,3 +37,7 @@ def default_net_util():
 
 def coreutil():
     return []  # Nothing needed.
+
+def arch_genrule(name, srcs, outs, cmd, tools):
+    cmd = cmd.replace("QEMU", "")
+    return native.genrule(name = name, srcs = srcs, outs = outs, cmd = cmd, tools = tools)
