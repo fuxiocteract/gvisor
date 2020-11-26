@@ -16,6 +16,7 @@ package proc
 
 import (
 	"bytes"
+	"fmt"
 	"sort"
 	"strconv"
 
@@ -264,4 +265,8 @@ func cpuInfoData(k *kernel.Kernel) string {
 
 func shmData(v uint64) dynamicInode {
 	return newStaticFile(strconv.FormatUint(v, 10))
+}
+
+func semData(semmsl, semmns, semopm, semmni uint64) dynamicInode {
+	return newStaticFile(fmt.Sprintf("%d %d %d %d\n", semmsl, semmns, semopm, semmni))
 }

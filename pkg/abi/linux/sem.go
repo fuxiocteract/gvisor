@@ -32,6 +32,27 @@ const (
 	SEM_STAT_ANY = 20
 )
 
+// information about system-wide sempahore limits and parameters.
+//
+// Source: include/uapi/linux/sem.h
+//
+// SEMMNI, SEMMSL and SEMMNS are default values which can be
+// modified by sysctl.
+const (
+	SEMMNI = 32000
+	SEMMSL = 32000
+	SEMMNS = SEMMNI * SEMMSL
+	SEMOPM = 500
+	SEMVMX = 32767
+	SEMAEM = SEMVMX
+
+	// followings are unused in kernel
+	SEMUME = SEMOPM
+	SEMMNU = SEMMNS
+	SEMMAP = SEMMNS
+	SEMUSZ = 20
+)
+
 const SEM_UNDO = 0x1000
 
 // Sembuf is equivalent to struct sembuf.

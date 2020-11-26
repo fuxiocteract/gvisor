@@ -2409,6 +2409,28 @@ TEST(ProcFilesystems, PresenceOfShmMaxMniAll) {
   ASSERT_LE(shmall, ULONG_MAX - (1UL << 24));
 }
 
+TEST(ProcFilesystems, PresenceOfSem) {
+  uint32_t semmsl = 0;
+  uint32_t semmns = 0;
+  uint32_t semopm = 0;
+  uint32_t semmni = 0;
+  std::string proc_file;
+  proc_file = ASSERT_NO_ERRNO_AND_VALUE(GetContents("/proc/sys/kernel/sem"));
+  ASSERT_FALSE(proc_file.empty());
+  std::vector<std::string_view> sem_limits =
+      absl::StrSplit(proc_file, absl::ByAnyChar(" \t"), absl::SkipWhitespace());
+  ASSERT_EQ(sem_limits.size(), 4);
+  ASSERT_TRUE(absl::SimpleAtoi(sem_limits[0], &semmsl));
+  ASSERT_TRUE(absl::SimpleAtoi(sem_limits[1], &semmns));
+  ASSERT_TRUE(absl::SimpleAtoi(sem_limits[2], &semopm));
+  ASSERT_TRUE(absl::SimpleAtoi(sem_limits[3], &semmni));
+
+  ASSERT_GT(semmsl, 0);
+  ASSERT_GT(semmns, 0);
+  ASSERT_GT(semopm, 0);
+  ASSERT_GT(semmni, 0);
+}
+
 // Check that /proc/mounts is a symlink to self/mounts.
 TEST(ProcMounts, IsSymlink) {
   auto link = ASSERT_NO_ERRNO_AND_VALUE(ReadLink("/proc/mounts"));

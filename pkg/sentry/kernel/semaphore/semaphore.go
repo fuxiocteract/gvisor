@@ -28,20 +28,6 @@ import (
 	"gvisor.dev/gvisor/pkg/syserror"
 )
 
-const (
-	valueMax = 32767 // SEMVMX
-
-	// semaphoresMax is "maximum number of semaphores per semaphore ID" (SEMMSL).
-	semaphoresMax = 32000
-
-	// setMax is "system-wide limit on the number of semaphore sets" (SEMMNI).
-	setsMax = 32000
-
-	// semaphoresTotalMax is "system-wide limit on the number of semaphores"
-	// (SEMMNS = SEMMNI*SEMMSL).
-	semaphoresTotalMax = 1024000000
-)
-
 // Registry maintains a set of semaphores that can be found by key or ID.
 //
 // +stateify savable
@@ -122,7 +108,7 @@ func NewRegistry(userNS *auth.UserNamespace) *Registry {
 // be found. If exclusive is true, it fails if a set with the same key already
 // exists.
 func (r *Registry) FindOrCreate(ctx context.Context, key, nsems int32, mode linux.FileMode, private, create, exclusive bool) (*Set, error) {
-	if nsems < 0 || nsems > semaphoresMax {
+	if nsems < 0 || nsems > linux.SEMMSL {
 		return nil, syserror.EINVAL
 	}
 
@@ -163,10 +149,10 @@ func (r *Registry) FindOrCreate(ctx context.Context, key, nsems int32, mode linu
 	}
 
 	// Apply system limits.
-	if len(r.semaphores) >= setsMax {
+	if len(r.semaphores) >= linux.SEMMNI {
 		return nil, syserror.EINVAL
 	}
-	if r.totalSems() > int(semaphoresTotalMax-nsems) {
+	if r.totalSems() > int(linux.SEMMNS-nsems) {
 		return nil, syserror.EINVAL
 	}
 
@@ -313,7 +299,7 @@ func (s *Set) GetStat(creds *auth.Credentials) (*linux.SemidDS, error) {
 
 // SetVal overrides a semaphore value, waking up waiters as needed.
 func (s *Set) SetVal(ctx context.Context, num int32, val int16, creds *auth.Credentials, pid int32) error {
-	if val < 0 || val > valueMax {
+	if val < 0 || val > linux.SEMVMX {
 		return syserror.ERANGE
 	}
 
@@ -348,7 +334,7 @@ func (s *Set) SetValAll(ctx context.Context, vals []uint16, creds *auth.Credenti
 	}
 
 	for _, val := range vals {
-		if val > valueMax {
+		if val > linux.SEMVMX {
 			return syserror.ERANGE
 		}
 	}
@@ -520,7 +506,7 @@ func (s *Set) executeOps(ctx context.Context, ops []linux.Sembuf, pid int32) (ch
 		} else {
 			if op.SemOp < 0 {
 				// Handle 'wait' operation.
-				if -op.SemOp > valueMax {
+				if -op.SemOp > linux.SEMVMX {
 					return nil, 0, syserror.ERANGE
 				}
 				if -op.SemOp > tmpVals[op.SemNum] {
@@ -535,7 +521,7 @@ func (s *Set) executeOps(ctx context.Context, ops []linux.Sembuf, pid int32) (ch
 				}
 			} else {
 				// op.SemOp > 0: Handle 'signal' operation.
-				if tmpVals[op.SemNum] > valueMax-op.SemOp {
+				if tmpVals[op.SemNum] > linux.SEMVMX-op.SemOp {
 					return nil, 0, syserror.ERANGE
 				}
 			}
