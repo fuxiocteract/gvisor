@@ -53,25 +53,9 @@ func TestAddressableEndpointStateCleanup(t *testing.T) {
 		ep.DecRef()
 	}
 
-	group := tcpip.Address("\x02")
-	if added, err := s.JoinGroup(group); err != nil {
-		t.Fatalf("s.JoinGroup(%s): %s", group, err)
-	} else if !added {
-		t.Fatalf("got s.JoinGroup(%s) = false, want = true", group)
-	}
-	if !s.IsInGroup(group) {
-		t.Fatalf("got s.IsInGroup(%s) = false, want = true", group)
-	}
-
 	s.Cleanup()
-	{
-		ep := s.AcquireAssignedAddress(addr.Address, false /* allowTemp */, stack.NeverPrimaryEndpoint)
-		if ep != nil {
-			ep.DecRef()
-			t.Fatalf("got s.AcquireAssignedAddress(%s, false, NeverPrimaryEndpoint) = %s, want = nil", addr.Address, ep.AddressWithPrefix())
-		}
-	}
-	if s.IsInGroup(group) {
-		t.Fatalf("got s.IsInGroup(%s) = true, want = false", group)
+	if ep := s.AcquireAssignedAddress(addr.Address, false /* allowTemp */, stack.NeverPrimaryEndpoint); ep != nil {
+		ep.DecRef()
+		t.Fatalf("got s.AcquireAssignedAddress(%s, false, NeverPrimaryEndpoint) = %s, want = nil", addr.Address, ep.AddressWithPrefix())
 	}
 }
